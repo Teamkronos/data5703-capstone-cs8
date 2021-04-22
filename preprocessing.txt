@@ -1,0 +1,208 @@
+#LIBRARIES
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+import cv2
+import tensorflow as tf
+from google.colab import drive
+from skimage.measure import label
+from keras.applications.resnet50 import preprocess_input
+
+#TO ACCESS MY GOOGLE DRIVE
+drive.mount('/content/drive', force_remount=True)
+
+#MY GOOGLE DRIVE PATH
+image_path = "drive/My Drive/Data5207project/HAM20/HAM10000_images"
+
+#LOAD IMAGES
+def loadImages(path):
+    # Put files into lists and return them as one list with all images in the folder
+    image_files = sorted([os.path.join(path, 'train', file)
+                          for file in os.listdir(path + "/train")
+                          if file.endswith('.jpg')])
+    return image_files
+    
+#DISPLAY FORMAT
+def display_three(a, b, c, title1 = "Original", title2 = "Edited", title3 = "Soft Attention"):
+    plt.subplot(131), plt.imshow(a), plt.title(title1)
+    plt.xticks([]), plt.yticks([])
+    plt.subplot(132), plt.imshow(b), plt.title(title2)
+    plt.xticks([]), plt.yticks([])
+    plt.subplot(133), plt.imshow(c), plt.title(title3)
+    plt.xticks([]), plt.yticks([])
+    plt.show()
+
+#HYPER-PARAMETERS FOR DULL RAZOR, BLUR AND SOFT ATTENTION MAPPING (TOTAL NUMBER OF HYPER-PARAMETERS = 11 excluding k)
+'''
+#Four outputs
+#1. res_img: Base resized image
+#2. image: hair removed image via dull razor and blurred
+#3. level_map_list: Blurred and hair removed image using soft attention mapping
+'''
+
+#resize
+resizeon = True #triggers resize
+resizeWp = 220 #height of resized image
+resizeHp = 220 #width of resized image
+resizeparams = (resizeWp, resizeHp)
+
+#dull razor
+dullrazorp = True #turns on (attempted) hair removal
+razorblurp = "M" #M for median, G for Gaussian
+razorblurnump = 3 #blur number
+filterstructurep = 5 #will form structure for kernel
+lowerboundp = 5 #15 original
+inpaintmatp = 3
+dullrazorparams = (dullrazorp,razorblurp,razorblurnump,filterstructurep,lowerboundp,inpaintmatp)
+
+#blur
+medianorgaussp = "M" #M for Median, G for Gaussian
+blurnump = 5 #higher numbers = more blur, think it has to be odd. 1 would be same as no blur.
+blurparams = (medianorgaussp, blurnump)
+
+#soft attention
+alphap = 0.7 #weight of the first array elements
+betap = 0.3 #weight of the second array elements
+gammap = 0 #scalar added to each sum
+saparams = (alphap, betap, gammap)
+
+#index number of display image 
+k = 14
+
+displayimages = True
+
+#READ IMAGES
+def read_image_cv2(Dataset):  
+  img = [cv2.imread(i, cv2.IMREAD_UNCHANGED,) for i in Dataset[:len(Dataset)]]
+  return img
+
+#RESIZE IMAGE
+def resize(Image,dimen):
+  #resize
+  dim = (dimen[0], dimen[1])
+  res_img = []
+  if resizeon == True:
+    for i in range(len(Image)):
+      res = cv2.resize(Image[i], dim, interpolation=cv2.INTER_LINEAR)
+      res_img.append(res)
+  else:
+    res_img = Image
+  return res_img
+
+#REMOVING HAIR USING DULL RAZOR
+def dull_razor(ResizedImages,dullrazorparameters):
+  #dull razor
+  dullrazor,razorblur,razorblurnum,filterstructure,lowerbound,inpaintmat = dullrazorparameters
+  hair_removed_images = []
+  if dullrazor == True:
+    for i in range(len(ResizedImages)):
+      if razorblur == "M":
+        tempimg = cv2.medianBlur(ResizedImages[i],razorblurnum)
+      elif razorblur == "G":
+        tempimg = cv2.GaussianBlur(ResizedImages[i], (razorblurnum,razorblurnum),0)
+      else:
+        tempimg = ResizedImages[i]
+      gyimage = cv2.cvtColor(tempimg, cv2.COLOR_RGB2GRAY)
+      filtersize = (filterstructure,filterstructure)
+      kernelrazor = cv2.getStructuringElement(cv2.MORPH_RECT, filtersize)
+      gyimage = cv2.morphologyEx(gyimage, cv2.MORPH_BLACKHAT, kernelrazor)
+
+      retrazor, maskrazor = cv2.threshold(gyimage, lowerbound, 255, cv2.THRESH_BINARY)
+      x = cv2.inpaint(ResizedImages[i], maskrazor, inpaintmat, cv2.INPAINT_TELEA)
+      hair_removed_images.append(x)
+  return hair_removed_images
+
+#BLUR AFTER REMOVING HAIR
+def blur(HairRemovedImages,blurparameters):
+  medianorgauss, blurnum = blurparameters
+  #blur
+  if medianorgauss == "M":
+    for i in range(len(HairRemovedImages)):
+      HairRemovedImages[i] = cv2.medianBlur(HairRemovedImages[i], blurnum)
+  elif medianorgauss == "G":
+    for i in range(len(HairRemovedImages)): 
+      HairRemovedImages[i] = cv2.GaussianBlur(HairRemovedImages[i], (blurnum, blurnum), 0)
+  return HairRemovedImages
+  
+  #SOFT ATTENTION MAPPING
+#####################
+#PREPROCESS IMAGES BEFOFE MAPPING
+def softention_preprocess(SoftentionImages):
+  expanded_list = []
+  # use the pre processing function of ResNet50 
+  for i in SoftentionImages:
+    first = preprocess_input(i)
+    second = np.expand_dims(first, 0)
+    expanded_list.append(second)
+  return expanded_list
+
+#ACTIVATION MAP
+#Given the pretrained model, we want to extract the activation maps at a certain layer via layer index number
+def get_activations_at(InputImage, LayerNumber, pretrained_model):
+  #index the layer 
+  out_layer = pretrained_model.layers[LayerNumber]
+  
+  #change the output of the model 
+  model = tf.keras.models.Model(inputs = pretrained_model.inputs, outputs = out_layer.output)
+  
+  #return the activations
+  return model.predict(InputImage)
+
+#ATTENTION MAP
+#After getting the activations in the 3D shape, we represent what parts of the image is the activation paying attention to the most ...
+# by converting the activation shape to 2D form. 
+def postprocess_activations(Activations,resizeparameters):
+  
+  output = np.abs(Activations)
+  output = np.sum(output, axis = -1).squeeze() 
+
+  #resize and convert to image 
+  output = cv2.resize(output, (resizeparameters[0], resizeparameters[1]))
+  output /= output.max() #output = output/output.max()
+  output *= 255 #output = output * 255
+  return 255 - output.astype('uint8')
+
+#GENERATE HEATMAPS OF SOFT ATTENTION MAPPING
+def apply_heatmap(Weights, SoftentionImages,saparameters):
+  alpha, beta, gamma = saparameters
+  for i in SoftentionImages:
+    heatmap = cv2.applyColorMap(Weights, cv2.COLORMAP_JET)
+    heatmap = cv2.addWeighted(heatmap, alpha, i, beta, gamma)
+  return heatmap
+#########################
+
+#PLOT ALL THREE IMAGES - RESIZED IMAGE, IMAGE WITH HAIR REMOVED AND IMAGE WITH SOFT ATTENTION MAPPING
+def plot_heatmaps(Range, SoftentionExpandedImages, pretrained_model, SoftentionImages, ResizedImages, HairRemovedImages, k,saparameters,displayimageYN,resizeparameters):  
+  #given a range of indices generate the heat maps 
+  level_map_list = []
+  for i in Range:
+    for j in SoftentionExpandedImages:
+      activated = get_activations_at(j, i, pretrained_model)
+      Weights = postprocess_activations(activated,resizeparameters)
+      heatmap = apply_heatmap(Weights, SoftentionImages,saparameters)
+      level_map_list.append(heatmap)
+  if displayimageYN == True:
+    plt.figure(figsize=(8, 8))
+    display_three(ResizedImages[k],HairRemovedImages[k],level_map_list[k], "original","dullrazor+blur", "soft attention")
+  # for k in range(len(level_map_list)):
+    # plt.figure(figsize=(8, 8))
+    # display_three(ResizedImages[k],HairRemovedImages[k],level_map_list[k], "original","dullrazor+blur", "soft attention")
+  return level_map_list
+ 
+def main(resizeparameters,dullrazorparameters,blurparameters,saparameters,displayimageYN):
+  data = loadImages(image_path)
+  print('number of FILES in directory: ', len(data)) #number of images
+  pretrained_model = tf.keras.applications.ResNet50(input_shape=(resizeparameters[0], resizeparameters[1], 3),
+                                                include_top=False,
+                                                weights='imagenet')
+  img = read_image_cv2(data)
+  res_img = resize(img,resizeparameters)
+  hair_removed_images = dull_razor(res_img,dullrazorparameters)
+  hair_removed_images = blur(hair_removed_images,blurparameters)
+  dullrazored_list =  hair_removed_images
+  SoftentionImages = dullrazored_list #don't know if this is redundant or notow 
+  expanded_list = softention_preprocess(dullrazored_list) 
+  softattentionmaps = plot_heatmaps(range(174,175), expanded_list, pretrained_model, SoftentionImages, res_img, hair_removed_images, k,saparameters,displayimageYN,resizeparameters)
+  
+  #return res_img, hair_removed_images, softattentionmaps
+main(resizeparams, dullrazorparams, blurparams, saparams, displayimages)
